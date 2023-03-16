@@ -1,12 +1,10 @@
+"""Useful classes and functions"""
 import healpy as hp
 from astropy.stats import bayesian_blocks
 import numpy as np
 import matplotlib.pyplot as plt
-
-try:
-    from misc import correlation
-except ImportError:
-    from .misc import correlation
+from typing import List
+from misc import correlation
 
 
 class Mask(np.ndarray):
@@ -16,39 +14,47 @@ class Mask(np.ndarray):
     length: length of the array
     """
     def __new__(cls, indices: list, length: int):
-        cls.indices = indices
+        # cls.indices = indices
         arr = np.zeros(length, dtype=np.int8)
         arr[indices] = True
         # cast the array to the subclass
-        return np.asarray(arr).view(cls)
-
-
-def map_correlation(map1, map2, mask: Mask):
-    """
-    Calculate the correlation of the two maps, but ignore masked pixels
-
-    map1, map2: arrays
-    mask: list of infices to consider
-    """
-    return correlation(map1[mask.indices], map2[mask.indices])
+        obj = np.asarray(arr).view(cls)
+        obj.indices = indices
+        return obj
 
 
 def masked_correlation(map1, map2, mask: Mask):
-    """ Calculates the correlation of the two maps, but ignore pixels that don't belong to the map """
+    """
+    Calculates the correlation of the two maps, but ignore
+    pixels that don't belong to the map
+
+    map1, map2: arrays
+    mask: Mask
+    returns: float
+    """
     return correlation(map1[mask.indices], map2[mask.indices])
 
 
-def proximity_masks(nside, angle_rad):
+def correlation_map(map1, map2, proximity_matrix: List[Mask]):
+    """Compute the correlation map of two input maps given a proximity matrix"""
+    if len(map1) != len(map2):
+        raise IndexError('Maps must share the same size')
+    v = [masked_correlation(map1, map2, proximity_matrix[i]) for i in range(len(map1))]
+    return np.array(v)
+
+
+def compute_proximity_masks(n_side, angle_rad):
     """
     For each pixel, compute the mask of adjacent pixels
+    Formally equivalent to a proximity matrix
     O(n_pix^2)
     """
     cos_angle = np.cos(angle_rad)
-    npix = hp.nside2npix(nside)
+    npix = hp.nside2npix(n_side)
     out = [[i] for i in range(npix)]
 
     # Convert pixel indices to spherical coordinates
-    theta, phi = hp.pix2ang(nside, np.arange(npix))
+    theta, phi = hp.pix2ang(n_side, np.arange(npix))
 
     # pre-computing
     sin_theta = np.sin(theta)
@@ -70,17 +76,17 @@ def proximity_masks(nside, angle_rad):
                 out[row].append(col)
                 out[col].append(row)
 
-    return [Mask[v] for v in out]
+    return [Mask(v, npix) for v in out]
 
 
-def get_temperature_range_mask(map, x_min, x_max) -> Mask:
+def get_temperature_range_mask(sky_map, x_min, x_max) -> Mask:
     """ returns a mask of the pixels in a given temperature range"""
-    return Mask([i for i, x in enumerate(map) if x_min <= x <= x_max], len(map))
+    return Mask([i for i, x in enumerate(sky_map) if x_min <= x <= x_max], len(sky_map))
 
 
 def temperature_bands_plot(map1, map2, n_bands=5):
     """ plot sky-maps segmented by temperature """
-    fig = plt.figure(figsize=(18, 4))
+    _ = plt.figure(figsize=(18, 4))
     for i in range(n_bands):
         x_min = i/n_bands
         x_max = (i+1)/n_bands
@@ -96,13 +102,13 @@ def temperature_bands_plot(map1, map2, n_bands=5):
                     bgcolor='0.1', sub=(2, n_bands, 1+i+n_bands))
 
 
-def adaptive_proximity(map, prox, p_temp):
+def adaptive_proximity(sky_map, prox, p_temp):
     """
     returns a list of pixels in proximity to each given pixel, that also
     satisfy some temperature requirement
     """
-    temp = [np.average([map[j] for j in v]) * p_temp for v in prox]
-    return [[j for j in v if map[j] >= temp[j]] for v in prox]
+    temp = [np.average([sky_map[j] for j in v]) * p_temp for v in prox]
+    return [[j for j in v if sky_map[j] >= temp[j]] for v in prox]
 
 
 def corr_analysis(map1, map2, n_bands=5):
@@ -112,7 +118,7 @@ def corr_analysis(map1, map2, n_bands=5):
         x_max = (i+1) / n_bands
         x_min = i / n_bands
         mask = get_temperature_range_mask(map1, x_min, x_max)
-        mat[i] = map_correlation(map1, map2, mask)
+        mat[i] = masked_correlation(map1, map2, mask)
     return mat
 
 
@@ -127,10 +133,10 @@ def correlation_plot(map1, map2, n_bands=5):
     plt.title('Temperature band correlation')
 
 
-def partition_brightness_spectrum(map):
-    edges = bayesian_blocks(map, p0=10 ** -7)
+def partition_brightness_spectrum(sky_map):
+    edges = bayesian_blocks(sky_map, p0=10 ** -7)
     print(', '.join([f'{x:.2f}' for x in edges]))
-    plt.hist(map, bins=list(edges), density=True)
+    plt.hist(sky_map, bins=list(edges), density=True)
     plt.title(f'Bayesian Blocks 408 Mhz spectrum')
     plt.xlabel('Value')
     plt.ylabel('Probability')

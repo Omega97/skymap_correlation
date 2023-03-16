@@ -1,5 +1,18 @@
-"""Miscellaneous functions"""
+"""Basic miscellaneous functions"""
 import numpy as np
+from time import time
+
+
+def take_time(fun):
+    def wrap2(*args, **kwargs):
+        t = time()
+        out = fun(*args, **kwargs)
+        self = args[0]
+        if self.verbose:
+            t = time() - t
+            print(f'\n> {type(self).__name__}.{fun.__name__}: {t:.2f} s')
+        return out
+    return wrap2
 
 
 def sigma(x):

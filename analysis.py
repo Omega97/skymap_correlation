@@ -3,7 +3,8 @@ import healpy as hp
 from astropy.io import fits
 from typing import List
 from misc import histogram_equalized, take_time
-from utils import correlation, compute_proximity_masks, Mask, correlation_map
+from utils import correlation, compute_proximity_masks, Mask, \
+    correlation_map, get_temperature_range_mask, masked_correlation
 
 
 class SkyMapAnalyzer:
@@ -69,6 +70,39 @@ class SkyMapAnalyzer:
 
     @take_time
     def compute_local_correlation(self, angle_rad=.2, i=0, j=1):
-        """for each pixel, compute the correlation between the maps for pixels within a certain angle"""
+        """for each pixel, compute the correlation between the maps for pixels within a certain angle
+        :param angle_rad: distance within which the correlation is considered
+        :param i: first map index
+        :param j: second map index
+        """
         masks = compute_proximity_masks(self.n_side, angle_rad)
         return self.compute_custom_correlation_maps(masks, i=i, j=j)
+
+    @take_time
+    def compute_temperature_correlation(self, spectral_segmentation_method, i=0, j=1, **kwargs) -> dict:
+        """
+        The first map is separated in temperature bands, then the correlation
+        between the two maps is calculated in those regions
+        :param spectral_segmentation_method: a method that separates the value distribution of a list
+        by returning a list of edges of bins
+        :param i: index of first map
+        :param j: index of second map
+        :param kwargs: keyword arguments for the spectral_segmentation_method
+        :return: dictionary containing list of edges, list of masks, list of correlations
+        between temperature bands, and number of bins
+        """
+        # compute edges
+        edges = spectral_segmentation_method(self.maps[i], **kwargs)
+        masks = []
+        correlations = []
+
+        for k in range(len(edges)-1):
+            # find mask
+            mask = get_temperature_range_mask(self.maps[i], edges[k], edges[k+1])
+            masks.append(mask)
+
+            # compute correlation
+            c = masked_correlation(self.maps[i], self.maps[j], mask)
+            correlations.append(c)
+
+        return {'edges': edges, 'masks': masks, 'correlations': correlations, 'n_bins': len(masks)}

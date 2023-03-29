@@ -1,6 +1,39 @@
 """Basic miscellaneous functions"""
 import numpy as np
 from time import time
+import os
+
+
+class ProgressBar:
+
+    def __init__(self, length=20):
+        self.length = length
+        self.t0 = time()
+        self.t1 = time()
+
+    def __call__(self, percentage, period=1.):
+        t = time()
+        if t - self.t1 > period or percentage == 1:
+            self.t1 = t
+            n = int(self.length * percentage)
+            try:
+                v = percentage / (self.t1-self.t0)
+                eta = (1-percentage) / v
+            except ZeroDivisionError:
+                eta = None
+            full = '=' * n
+            empty = ' ' * (self.length - n)
+            s = f'\r[{full}{empty}]'
+            if eta:
+                s += f'  eta = {eta//60:2.0f} min {eta%60:2.0f} s'
+            print(end=s)
+
+
+def make_dir(path):
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass
 
 
 def take_time(fun):
@@ -35,7 +68,9 @@ def correlation(x, y):
 
 
 def histogram_equalized(arr):
-    """histogram-equalization normalizes the image and enhances contrast"""
+    """histogram-equalization normalizes the image and enhances contrast
+    The output map has uniform distribution of values between 0 an 1
+    """
     n = len(arr)
     v = sorted(range(n), key=arr.__getitem__)
     w = sorted(range(n), key=v.__getitem__)

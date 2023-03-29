@@ -1,82 +1,129 @@
 """Sky-map"""
 import healpy as hp
+import numpy as np
 from astropy.io import fits
-from typing import List
-from misc import histogram_equalized, take_time
-from utils import correlation, compute_proximity_masks, Mask, \
-    correlation_map, get_temperature_range_mask, masked_correlation
+from scipy.sparse import save_npz, load_npz
+from scipy.sparse import csr_matrix
+from misc import histogram_equalized, take_time, make_dir
+from utils import correlation, correlation_map, get_temperature_range_mask, \
+    masked_correlation, compute_proximity_matrix_fast
+import os
 
 
-class SkyMapAnalyzer:
+class SkyMapAnalyzer(list):
     """
     This class performs the analysis of the correlation between sky-maps
     """
     def __init__(self, *map_paths, verbose=False):
+        super().__init__()
         self.paths = map_paths
         self.verbose = verbose
-        self.maps = None
         self.n_side = None
         self.n_pixels = None
+        self.proximity_masks = None
+        self.proximity_matrix = None
         self._load_data()
 
-    def __len__(self):
-        return len(self.paths)
+    @take_time
+    def plot(self):
+        for i, sky_map in enumerate(self):
+            hp.mollview(sky_map, cmap='jet', title=f'map {i}', sub=(1, len(self), i + 1))
 
-    def __iter__(self):
-        return iter(self.maps)
+    def _update_n_side(self):
+        self.n_side = None
+        if len(self):
+            sizes = [hp.npix2nside(len(m)) for m in self]
+            if min(sizes) == max(sizes):
+                self.n_side = min(sizes)
+
+    def add_maps(self, *maps):
+        """add new sky_maps"""
+        for sky_map in maps:
+            self.append(sky_map)
+        self._update_n_side()
 
     @take_time
     def _load_data(self):
-        """load locally-saved data"""
-        self.maps = []
-        for i in range(len(self)):
-            with fits.open(self.paths[i]) as lambda_list_1:
+        """
+        Load locally-saved data
+        Each map is saved in the list maps as a numpy array
+        """
+        self.clear()
+        for path in self.paths:
+            with fits.open(path) as lambda_list_1:
                 if self.verbose:
                     print()
                     lambda_list_1.info()
-                self.maps.append(hp.read_map(lambda_list_1))
+                self.add_maps(hp.read_map(lambda_list_1))
 
     @take_time
     def normalize(self):
+        """
+        Maps are normalized using histogram equalization to enhance contrast
+        The resulting maps have uniform distribution of values between 0 an 1
+        """
         normalized_maps = []
         for sky_map in self:
             normalized_maps.append(histogram_equalized(sky_map))
-        self.maps = normalized_maps
+        self.clear()
+        self.add_maps(*normalized_maps)
 
     @take_time
     def downscale(self, new_n_side):
         self.n_side = new_n_side
         self.n_pixels = hp.nside2npix(new_n_side)
         for i in range(len(self)):
-            self.maps[i] = hp.ud_grade(map_in=self.maps[i], nside_out=new_n_side)
+            self[i] = hp.ud_grade(map_in=self[i], nside_out=new_n_side)
 
     @take_time
     def compute_global_correlation(self, i=0, j=1):
         """ Global correlation of the whole normalized maps of indices i and j """
-        return correlation(self.maps[i], self.maps[j])
+        return correlation(self[i], self[j])
 
     @take_time
-    def compute_custom_correlation_maps(self, proximity_matrix: List[Mask], i=0, j=1):
-        """
-        Given a list of proximity masks, compute the correlation
-        between masked maps of indices i and j
+    def compute_custom_correlation_maps(self, proximity_matrix, i=0, j=1):
+        return correlation_map(self[i], self[j], proximity_matrix)
 
-        :param proximity_matrix: list of masks that define whether two pixels are close or not
-        :param i: first map index
-        :param j: second map index
-        :return: sky-map of correlation values
-        """
-        return correlation_map(self.maps[i], self.maps[j], proximity_matrix)
+    def get_local_matrix_path(self, angle_deg):
+        make_dir('local')
+        return f'local/prox_mat_{self.n_side}_{angle_deg:.0f}.npz'
 
     @take_time
-    def compute_local_correlation(self, angle_rad=.2, i=0, j=1):
+    def _load_proximity_matrix(self, angle_deg):
+        path = self.get_local_matrix_path(angle_deg)
+        if os.path.isfile(path):
+            with open(path, 'rb') as file:
+                self.proximity_matrix = load_npz(file)
+                assert self.proximity_matrix.shape == (self.n_pixels, self.n_pixels)
+
+    @take_time
+    def _save_proximity_matrix(self, angle_deg):
+        if self.verbose:
+            print('Saving proximity matrix...')
+        path = self.get_local_matrix_path(angle_deg)
+        save_npz(path, self.proximity_matrix)
+
+    @take_time
+    def compute_local_correlation(self, angle_deg=11., i=0, j=1):
         """for each pixel, compute the correlation between the maps for pixels within a certain angle
-        :param angle_rad: distance within which the correlation is considered
+        :param angle_deg: distance within which the correlation is considered
         :param i: first map index
         :param j: second map index
         """
-        masks = compute_proximity_masks(self.n_side, angle_rad)
-        return self.compute_custom_correlation_maps(masks, i=i, j=j)
+        self._load_proximity_matrix(angle_deg)
+        if self.proximity_matrix is None:
+            angle_rad = np.deg2rad(angle_deg)
+            rows, cols = compute_proximity_matrix_fast(self.n_side, angle_rad,
+                                                       show_progress=self.verbose)
+            data = [1 for _ in range(len(rows))]
+            if self.verbose:
+                print('Building proximity matrix...')
+            self.proximity_matrix = csr_matrix((data, (rows, cols)),
+                                               shape=(self.n_pixels, self.n_pixels),
+                                               dtype=np.uint8)
+            self._save_proximity_matrix(angle_deg)
+
+        return self.compute_custom_correlation_maps(self.proximity_matrix, i=i, j=j)
 
     @take_time
     def compute_temperature_correlation(self, spectral_segmentation_method, i=0, j=1, **kwargs) -> dict:
@@ -92,17 +139,17 @@ class SkyMapAnalyzer:
         between temperature bands, and number of bins
         """
         # compute edges
-        edges = spectral_segmentation_method(self.maps[i], **kwargs)
+        edges = spectral_segmentation_method(self[i], **kwargs)
         masks = []
         correlations = []
 
         for k in range(len(edges)-1):
             # find mask
-            mask = get_temperature_range_mask(self.maps[i], edges[k], edges[k+1])
+            mask = get_temperature_range_mask(self[i], edges[k], edges[k+1])
             masks.append(mask)
 
             # compute correlation
-            c = masked_correlation(self.maps[i], self.maps[j], mask)
+            c = masked_correlation(self[i], self[j], mask)
             correlations.append(c)
 
         return {'edges': edges, 'masks': masks, 'correlations': correlations, 'n_bins': len(masks)}
